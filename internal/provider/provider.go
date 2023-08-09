@@ -27,7 +27,7 @@ type SubnetCalculatorProvider struct {
 type SubnetCalculatorProviderModel struct{}
 
 func (p *SubnetCalculatorProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
-	resp.TypeName = "subnet_calculator"
+	resp.TypeName = "netcalc"
 	resp.Version = p.version
 }
 
