@@ -1,10 +1,9 @@
 package subnetcalculator
 
 import (
+	"errors"
 	"fmt"
-	"math"
-	"math/big"
-	"net"
+	"net/netip"
 
 	iradix "github.com/hashicorp/go-immutable-radix"
 )
@@ -13,59 +12,102 @@ import (
 type SubnetCalculator struct {
 	Supernets *iradix.Tree
 	Subnets   *iradix.Tree
+	Mode      Mode
 }
 
+type Mode int
+
+const (
+	ModeV4 Mode = iota + 1
+	ModeV6
+)
+
 // New creates a new SubnetCalculator from a list of supernets and subnets.
-func New(supernets, subnets []net.IPNet) SubnetCalculator {
-	subnetsTree := iradix.New()
-	for _, subnet := range subnets {
-		subnetsTree, _, _ = subnetsTree.Insert(subnet.IP, subnet)
+func New(supernets, subnets []netip.Prefix) (SubnetCalculator, error) {
+	if len(supernets) == 0 {
+		return SubnetCalculator{}, errors.New("At least one CIDR block must be provided.")
 	}
+
+	var mode Mode = 0
+
 	supernetsTree := iradix.New()
 	for _, supernet := range supernets {
-		supernetsTree, _, _ = supernetsTree.Insert(supernet.IP, supernet)
+		switch {
+		case mode == 0 && supernet.Addr().Is4():
+			mode = ModeV4
+		case mode == 0 && supernet.Addr().Is6():
+			mode = ModeV6
+		case mode == ModeV4 && !supernet.Addr().Is4():
+			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
+		case mode == ModeV6 && !supernet.Addr().Is6():
+			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
+		}
+		addr := supernet.Addr().As16()
+		bytes := make([]byte, len(addr))
+		copy(bytes, addr[:])
+		supernetsTree, _, _ = supernetsTree.Insert(bytes, supernet)
 	}
+	subnetsTree := iradix.New()
+	for _, subnet := range subnets {
+		switch {
+		case mode == ModeV4 && !subnet.Addr().Is4():
+			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
+		case mode == ModeV6 && !subnet.Addr().Is6():
+			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
+		}
+		addr := subnet.Addr().As16()
+		bytes := make([]byte, len(addr))
+		copy(bytes, addr[:])
+		subnetsTree, _, _ = subnetsTree.Insert(bytes, subnet)
+	}
+
 	return SubnetCalculator{
 		Supernets: supernetsTree,
 		Subnets:   subnetsTree,
-	}
+		Mode:      mode,
+	}, nil
 }
 
 // NextAvailableSubnet finds the first available subnet of a given mask length
 // from a list of subnets and supernets, and fails if none are available.
-func (sc *SubnetCalculator) NextAvailableSubnet(mask net.IPMask) (net.IPNet, error) {
-	// generate all eligible subnets with <mask> length from provided supernets
-	eligible := sc.generateEligibleIPNets(mask)
+func (sc *SubnetCalculator) NextAvailableSubnet(numBits int) (netip.Prefix, error) {
 	// for each eligible subnet, walk the tree and determine if the subnet is
 	// available for use, and return the first subnet that is available.
-	for _, subnet := range eligible {
+
+	sf := newSubnetFactory(sc, numBits)
+	defer sf.stop()
+
+	for subnet := range sf.subnetsChan {
 		if sc.subnetAvailable(subnet) {
-			sc.Subnets, _, _ = sc.Subnets.Insert(subnet.IP, subnet)
+			addr := subnet.Addr().As16()
+			bytes := make([]byte, len(addr))
+			copy(bytes, addr[:])
+			sc.Subnets, _, _ = sc.Subnets.Insert(bytes, subnet)
 			return subnet, nil
 		}
 	}
-	ones, _ := mask.Size()
-	return net.IPNet{}, fmt.Errorf("No eligible subnet with mask /%v found", ones)
+
+	return netip.Prefix{}, fmt.Errorf("No eligible subnet with mask /%v found", numBits)
 }
 
 // subnetAvailable tests to see if an IPNet is available in an existing tree of subnets.
-func (sc *SubnetCalculator) subnetAvailable(ipnet net.IPNet) bool {
+func (sc *SubnetCalculator) subnetAvailable(ipnet netip.Prefix) bool {
 	result := true
 	sc.Subnets.Root().Walk(func(k []byte, v interface{}) bool {
-		n, ok := v.(net.IPNet)
+		n, ok := v.(netip.Prefix)
 		if !ok {
 			panic("unexpected node type found in radix tree")
 		}
-		ones, _ := n.Mask.Size()
-		// fmt.Printf("net: %s   ones: %d   bits: %d\n", currentIPNet.String(), ones, bits)
-		if ones <= 16 {
-			return false
-		}
-		if n.Contains(ipnet.IP) {
+		// ones, _ := n.Mask.Size()
+		// // fmt.Printf("net: %s   ones: %d   bits: %d\n", currentIPNet.String(), ones, bits)
+		// if ones <= 16 {
+		// 	return false
+		// }
+		if n.Contains(ipnet.Addr()) {
 			result = false
 			return true
 		}
-		if ipnet.Contains(n.IP) {
+		if ipnet.Contains(n.Addr()) {
 			result = false
 			return true
 		}
@@ -74,74 +116,133 @@ func (sc *SubnetCalculator) subnetAvailable(ipnet net.IPNet) bool {
 	return result
 }
 
-// PercentUsed calculates what percentage of the Supernets have been
-// used by the Subnets.
-func (sc *SubnetCalculator) PercentUsed() float64 {
-	var totalAvailable, totalUsed float64
-
-	sc.Supernets.Root().Walk(func(k []byte, v interface{}) bool {
-		n, ok := v.(net.IPNet)
-		if !ok {
-			panic("unexpected node type found in radix tree")
-		}
-		ones, bits := n.Mask.Size()
-		totalAvailable = totalAvailable + math.Exp2(float64(bits-ones))
-		return false
-	})
-
-	sc.Subnets.Root().Walk(func(k []byte, v interface{}) bool {
-		n, ok := v.(net.IPNet)
-		if !ok {
-			panic("unexpected node type found in radix tree")
-		}
-		ones, bits := n.Mask.Size()
-		totalUsed = totalUsed + math.Exp2(float64(bits-ones))
-		return false
-	})
-
-	return (totalUsed / totalAvailable) * float64(100)
+type subnetFactory struct {
+	supernets    *iradix.Tree
+	prefixLength int
+	subnetsChan  chan netip.Prefix
+	mode         Mode
+	doneChan     chan struct{}
 }
 
-// generateEligibleIPNets calculates all possible subnets with a given mask
-// from all available supernets.
-func (sc *SubnetCalculator) generateEligibleIPNets(mask net.IPMask) []net.IPNet {
-	result := []net.IPNet{}
-	sc.Supernets.Root().Walk(func(k []byte, v interface{}) bool {
-		n, ok := v.(net.IPNet)
-		if !ok {
-			panic("unexpected node type found in radix tree")
-		}
-		netOnes, _ := n.Mask.Size()
-		maskOnes, _ := mask.Size()
-		if netOnes > maskOnes {
+func newSubnetFactory(sc *SubnetCalculator, prefixLength int) *subnetFactory {
+	sf := &subnetFactory{
+		supernets:    sc.Supernets,
+		prefixLength: prefixLength,
+		subnetsChan:  make(chan netip.Prefix),
+		mode:         sc.Mode,
+		doneChan:     make(chan struct{}),
+	}
+	go sf.run()
+	return sf
+}
+
+func (sf *subnetFactory) stop() {
+	close(sf.doneChan)
+}
+
+func (sf *subnetFactory) run() {
+	switch sf.mode {
+	case ModeV4:
+		sf.run4()
+	case ModeV6:
+		sf.run6()
+	default:
+		panic("subnetFactory mode unset")
+	}
+}
+
+func (sf *subnetFactory) run4() {
+	sf.supernets.Root().Walk(func(k []byte, v interface{}) bool {
+		select {
+		case <-sf.doneChan:
+			return true
+		default:
+			n, ok := v.(netip.Prefix)
+			if !ok {
+				panic("unexpected node type found in radix tree")
+			}
+			addr := n.Addr().As4()
+			newPrefix := netip.PrefixFrom(netip.AddrFrom4(addr), sf.prefixLength)
+			sf.subnetsChan <- newPrefix
+			for {
+				addr = increment4(addr, sf.prefixLength)
+				newPrefix = netip.PrefixFrom(netip.AddrFrom4(addr), sf.prefixLength)
+				if !n.Contains(newPrefix.Addr()) {
+					break
+				}
+				sf.subnetsChan <- newPrefix
+			}
 			return false
 		}
-		// Starting network is base network of CIDR, with new calculated mask
-		baseNet := net.IPNet{IP: n.IP, Mask: mask}
-		numSubnets := int(math.Exp2(float64(maskOnes - netOnes)))
-		for i := 0; i < numSubnets; i++ {
-			nextNet := getSubnet(baseNet, i)
-			result = append(result, nextNet)
-		}
-		return false
 	})
-	return result
+	close(sf.subnetsChan)
 }
 
-// getSubnet calculates the nth subnet up from a starting subnet.
-func getSubnet(ip net.IPNet, n int) net.IPNet {
-	// Get lowest mask bit position
-	l, _ := ip.Mask.Size()
-	l = 32 - l
-	// Calculate integer value times multiplier to get step up from base network
-	step := int64(math.Exp2(float64(l))) * int64(n)
-	// Convert base network IP to large integer
-	baseNetInt := new(big.Int)
-	baseNetInt.SetBytes(ip.IP)
-	// Add step value to base network to get new network
-	newNetInt := big.NewInt(baseNetInt.Int64() + step)
-	// Convert new network int to net.IP
-	newNet := net.IP(newNetInt.Bytes())
-	// Construct new net.IPNet from new network and mask
-	return net.IPNet{IP: newNet, Mask: ip.Mask}
+func (sf *subnetFactory) run6() {
+	sf.supernets.Root().Walk(func(k []byte, v interface{}) bool {
+		select {
+		case <-sf.doneChan:
+			return true
+		default:
+			n, ok := v.(netip.Prefix)
+			if !ok {
+				panic("unexpected node type found in radix tree")
+			}
+			addr := n.Addr().As16()
+			newPrefix := netip.PrefixFrom(netip.AddrFrom16(addr), sf.prefixLength)
+			sf.subnetsChan <- newPrefix
+			for {
+				addr = increment16(addr, sf.prefixLength)
+				newPrefix = netip.PrefixFrom(netip.AddrFrom16(addr), sf.prefixLength)
+				if !n.Contains(newPrefix.Addr()) {
+					break
+				}
+				sf.subnetsChan <- newPrefix
+			}
+			return false
+		}
+	})
+	close(sf.subnetsChan)
+}
+
+func increment4(a [4]byte, bit int) [4]byte {
+	octet := (bit - 1) / 8
+	val := uint16(128) >> ((bit - 1) - (octet * 8))
+	sum16 := uint16(a[octet]) + val
+	a[octet] = byte(sum16)
+	carry := sum16 >> 8
+	for {
+		if carry == 0 {
+			return a
+		}
+		octet--
+		if octet < 0 {
+			// overflow
+			return [4]byte{}
+		}
+		sum16 = uint16(a[octet]) + carry
+		a[octet] = byte(sum16)
+		carry = sum16 >> 8
+	}
+}
+
+func increment16(a [16]byte, bit int) [16]byte {
+	octet := (bit - 1) / 8
+	val := uint16(128) >> ((bit - 1) - (octet * 8))
+	sum16 := uint16(a[octet]) + val
+	a[octet] = byte(sum16)
+	carry := sum16 >> 8
+	for {
+		if carry == 0 {
+			return a
+		}
+		octet--
+		if octet < 0 {
+			// overflow
+			return [16]byte{}
+		}
+		sum16 = uint16(a[octet]) + carry
+		a[octet] = byte(sum16)
+		carry = sum16 >> 8
+	}
 }
