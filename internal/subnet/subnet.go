@@ -1,4 +1,4 @@
-package subnetcalculator
+package subnet
 
 import (
 	"errors"
@@ -8,81 +8,112 @@ import (
 	iradix "github.com/hashicorp/go-immutable-radix"
 )
 
-// SubnetCalculator stores radix trees of supernets and subnets.
-type SubnetCalculator struct {
-	Supernets *iradix.Tree
-	Subnets   *iradix.Tree
-	Mode      Mode
+// Calculator stores radix trees of supernets and subnets.
+type Calculator struct {
+	Pools             *iradix.Tree
+	AllocatedPrefixes *iradix.Tree
+	Mode              Mode
 }
 
 type Mode int
 
 const (
-	ModeV4 Mode = iota + 1
+	ModeUnknown Mode = iota
+	ModeV4
 	ModeV6
 )
 
-// New creates a new SubnetCalculator from a list of supernets and subnets.
-func New(supernets, subnets []netip.Prefix) (SubnetCalculator, error) {
-	if len(supernets) == 0 {
-		return SubnetCalculator{}, errors.New("At least one CIDR block must be provided.")
+// New creates a new Calculator from a list of supernets and subnets.
+func NewCalculator() *Calculator {
+	return &Calculator{
+		Pools:             iradix.New(),
+		AllocatedPrefixes: iradix.New(),
+		Mode:              ModeUnknown, // Mode will be discovered by the first prefix added.
 	}
+}
 
-	var mode Mode = 0
+func (c *Calculator) checkMode(prefix netip.Prefix) error {
+	switch {
+	case c.Mode == ModeUnknown && prefix.Addr().Is4():
+		c.Mode = ModeV4
+	case c.Mode == ModeUnknown && prefix.Addr().Is6():
+		c.Mode = ModeV6
+	case c.Mode == ModeV4 && !prefix.Addr().Is4():
+		return errors.New("Attempting to add an IPv6 CIDR to an IPv4 calculator, all CIDRs must be of the same type.")
+	case c.Mode == ModeV6 && !prefix.Addr().Is6():
+		return errors.New("Attempting to add an IPv4 CIDR to an IPv6 calculator, all CIDRs must be of the same type.")
+	}
+	return nil
+}
 
-	supernetsTree := iradix.New()
-	for _, supernet := range supernets {
-		switch {
-		case mode == 0 && supernet.Addr().Is4():
-			mode = ModeV4
-		case mode == 0 && supernet.Addr().Is6():
-			mode = ModeV6
-		case mode == ModeV4 && !supernet.Addr().Is4():
-			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
-		case mode == ModeV6 && !supernet.Addr().Is6():
-			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
+func (c *Calculator) AddPool(prefix netip.Prefix) error {
+	if err := c.checkMode(prefix); err != nil {
+		return err
+	}
+	addr := prefix.Addr().As16()
+	bytes := make([]byte, len(addr))
+	copy(bytes, addr[:])
+	c.Pools, _, _ = c.Pools.Insert(bytes, prefix)
+	return nil
+}
+
+func (c *Calculator) DeletePool(prefix netip.Prefix) {
+	addr := prefix.Addr().As16()
+	bytes := make([]byte, len(addr))
+	copy(bytes, addr[:])
+	c.Pools, _, _ = c.Pools.Delete(bytes)
+}
+
+func (c *Calculator) AddAllocatedPrefix(prefix netip.Prefix) error {
+	if err := c.checkMode(prefix); err != nil {
+		return err
+	}
+	addr := prefix.Addr().As16()
+	bytes := make([]byte, len(addr))
+	copy(bytes, addr[:])
+	c.AllocatedPrefixes, _, _ = c.AllocatedPrefixes.Insert(bytes, prefix)
+	return nil
+}
+
+func (c *Calculator) DeleteAllocatedPrefix(prefix netip.Prefix) {
+	addr := prefix.Addr().As16()
+	bytes := make([]byte, len(addr))
+	copy(bytes, addr[:])
+	c.AllocatedPrefixes, _, _ = c.AllocatedPrefixes.Delete(bytes)
+}
+
+// PrefiInPools tests to see if a prefix is a part of any of the
+// pools that have been added to the calculator.
+func (c *Calculator) PrefixInPools(prefix netip.Prefix) bool {
+	result := false
+	c.Pools.Root().Walk(func(k []byte, v interface{}) bool {
+		n, ok := v.(netip.Prefix)
+		if !ok {
+			panic("unexpected node type found in radix tree")
 		}
-		addr := supernet.Addr().As16()
-		bytes := make([]byte, len(addr))
-		copy(bytes, addr[:])
-		supernetsTree, _, _ = supernetsTree.Insert(bytes, supernet)
-	}
-	subnetsTree := iradix.New()
-	for _, subnet := range subnets {
-		switch {
-		case mode == ModeV4 && !subnet.Addr().Is4():
-			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
-		case mode == ModeV6 && !subnet.Addr().Is6():
-			return SubnetCalculator{}, errors.New("Mix of IPv4 and IPv6 CIDRs detected, all CIDRs must be of the same type.")
+		if n.Contains(prefix.Addr()) {
+			result = true
+			return true
 		}
-		addr := subnet.Addr().As16()
-		bytes := make([]byte, len(addr))
-		copy(bytes, addr[:])
-		subnetsTree, _, _ = subnetsTree.Insert(bytes, subnet)
-	}
-
-	return SubnetCalculator{
-		Supernets: supernetsTree,
-		Subnets:   subnetsTree,
-		Mode:      mode,
-	}, nil
+		return false
+	})
+	return result
 }
 
 // NextAvailableSubnet finds the first available subnet of a given mask length
 // from a list of subnets and supernets, and fails if none are available.
-func (sc *SubnetCalculator) NextAvailableSubnet(numBits int) (netip.Prefix, error) {
-	// for each eligible subnet, walk the tree and determine if the subnet is
+func (c *Calculator) NextAvailableSubnet(numBits int) (netip.Prefix, error) {
+	// For each eligible subnet, walk the tree and determine if the subnet is
 	// available for use, and return the first subnet that is available.
-
-	sf := newSubnetFactory(sc, numBits)
+	sf := newSubnetFactory(c, numBits)
 	defer sf.stop()
 
 	for subnet := range sf.subnetsChan {
-		if sc.subnetAvailable(subnet) {
+		if c.prefixAvailable(subnet) {
 			addr := subnet.Addr().As16()
 			bytes := make([]byte, len(addr))
 			copy(bytes, addr[:])
-			sc.Subnets, _, _ = sc.Subnets.Insert(bytes, subnet)
+			c.AllocatedPrefixes, _, _ = c.AllocatedPrefixes.Insert(bytes, subnet)
 			return subnet, nil
 		}
 	}
@@ -91,9 +122,9 @@ func (sc *SubnetCalculator) NextAvailableSubnet(numBits int) (netip.Prefix, erro
 }
 
 // subnetAvailable tests to see if an IPNet is available in an existing tree of subnets.
-func (sc *SubnetCalculator) subnetAvailable(ipnet netip.Prefix) bool {
+func (c *Calculator) prefixAvailable(prefix netip.Prefix) bool {
 	result := true
-	sc.Subnets.Root().Walk(func(k []byte, v interface{}) bool {
+	c.AllocatedPrefixes.Root().Walk(func(k []byte, v interface{}) bool {
 		n, ok := v.(netip.Prefix)
 		if !ok {
 			panic("unexpected node type found in radix tree")
@@ -103,11 +134,11 @@ func (sc *SubnetCalculator) subnetAvailable(ipnet netip.Prefix) bool {
 		// if ones <= 16 {
 		// 	return false
 		// }
-		if n.Contains(ipnet.Addr()) {
+		if n.Contains(prefix.Addr()) {
 			result = false
 			return true
 		}
-		if ipnet.Contains(n.Addr()) {
+		if prefix.Contains(n.Addr()) {
 			result = false
 			return true
 		}
@@ -124,12 +155,12 @@ type subnetFactory struct {
 	doneChan     chan struct{}
 }
 
-func newSubnetFactory(sc *SubnetCalculator, prefixLength int) *subnetFactory {
+func newSubnetFactory(c *Calculator, prefixLength int) *subnetFactory {
 	sf := &subnetFactory{
-		supernets:    sc.Supernets,
+		supernets:    c.Pools,
 		prefixLength: prefixLength,
 		subnetsChan:  make(chan netip.Prefix),
-		mode:         sc.Mode,
+		mode:         c.Mode,
 		doneChan:     make(chan struct{}),
 	}
 	go sf.run()

@@ -12,11 +12,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 )
 
-// Ensure SubnetCalculatorProvider satisfies various provider interfaces.
-var _ provider.Provider = &SubnetCalculatorProvider{}
+// Ensure NetcalcProvider satisfies various provider interfaces.
+var _ provider.Provider = &NetcalcProvider{}
 
-// SubnetCalculatorProvider defines the provider implementation.
-type SubnetCalculatorProvider struct {
+// NetcalcProvider defines the provider implementation.
+type NetcalcProvider struct {
 	// version is set to the provider version on release, "dev" when the
 	// provider is built and ran locally, and "test" when running acceptance
 	// testing.
@@ -26,16 +26,16 @@ type SubnetCalculatorProvider struct {
 // SubnetCalculatorProviderModel describes the provider data model.
 type SubnetCalculatorProviderModel struct{}
 
-func (p *SubnetCalculatorProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
+func (p *NetcalcProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
 	resp.TypeName = "netcalc"
 	resp.Version = p.version
 }
 
-func (p *SubnetCalculatorProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
+func (p *NetcalcProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{}
 }
 
-func (p *SubnetCalculatorProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
+func (p *NetcalcProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	var data SubnetCalculatorProviderModel
 
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
@@ -45,19 +45,19 @@ func (p *SubnetCalculatorProvider) Configure(ctx context.Context, req provider.C
 	}
 }
 
-func (p *SubnetCalculatorProvider) Resources(ctx context.Context) []func() resource.Resource {
+func (p *NetcalcProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
-		NewSubnetResource,
+		NewSubnetsResource,
 	}
 }
 
-func (p *SubnetCalculatorProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
+func (p *NetcalcProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{}
 }
 
 func New(version string) func() provider.Provider {
 	return func() provider.Provider {
-		return &SubnetCalculatorProvider{
+		return &NetcalcProvider{
 			version: version,
 		}
 	}
