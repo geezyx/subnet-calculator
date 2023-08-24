@@ -83,3 +83,11 @@ data "aws_subnet" "subnet" {
 
 - `cidr_blocks` (List of String) Calculated CIDR block.
 - `id` (String) Resource ID, same as the calculated cidr_blocks.
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import netcalc_subnets.example 10.0.0.0/24,10.0.1.0/24,10.0.2.0/24
+```

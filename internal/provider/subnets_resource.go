@@ -35,7 +35,7 @@ func NewSubnetsResource() resource.Resource {
 type SubnetsResource struct {
 }
 
-// SubnetResourceModel describes the resource data model.
+// SubnetsResourceModel describes the resource data model.
 type SubnetsResourceModel struct {
 	PoolCIDRBlocks     types.Set    `tfsdk:"pool_cidr_blocks"`
 	ExistingCIDRBlocks types.Set    `tfsdk:"existing_cidr_blocks"`
