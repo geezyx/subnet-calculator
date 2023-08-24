@@ -4,20 +4,10 @@
 package provider
 
 import (
-	"errors"
-	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
-
-func isUUID(value string) error {
-	re := regexp.MustCompile(`^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$`)
-	if !re.Match([]byte(value)) {
-		return errors.New("value is not UUID")
-	}
-	return nil
-}
 
 func TestAccSubnetResource(t *testing.T) {
 	resource.Test(t, resource.TestCase{
@@ -33,13 +23,13 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count       = 3
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.0.0/24,10.0.1.0/24,10.0.2.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.1.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.0.2.0/24"),
 				),
 			},
-			// Update and Read testing
+			// Changing cidr_count causes recalculation
 			{
 				Config: `
 				resource "netcalc_subnets" "test" {
@@ -49,8 +39,24 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count           = 1
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
-					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.1.0/24"),
+				),
+			},
+			// Only available CIDR blocks are chosen
+			{
+				Config: `
+				resource "netcalc_subnets" "test" {
+					pool_cidr_blocks     = ["10.0.0.0/16"]
+					existing_cidr_blocks = ["10.0.0.0/24","10.0.2.0/24","10.0.3.0/24","10.0.4.128/25","10.0.6.0/24"]
+					cidr_mask_length     = 24
+					cidr_count           = 3
+				  }`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.1.0/24,10.0.5.0/24,10.0.7.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.5.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.0.7.0/24"),
 				),
 			},
 		},
@@ -68,11 +74,25 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count       = 1
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.0.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
 				),
 			},
-			// Update and Read testing
+			// Updating the existing cidr blocks should not cause changes
+			{
+				Config: `
+				resource "netcalc_subnets" "test" {
+					pool_cidr_blocks = ["10.0.0.0/16"]
+					existing_cidr_blocks = ["10.0.0.0/24"]
+					cidr_mask_length = 24
+					cidr_count       = 1
+				  }`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.0.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
+				),
+			},
+			// Changing the CIDR block count should cause a recalculation
 			{
 				Config: `
 				resource "netcalc_subnets" "test" {
@@ -82,10 +102,46 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count           = 3
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
-					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
-					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.1.0/24"),
-					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.0.2.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.1.0/24,10.0.2.0/24,10.0.3.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.2.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.0.3.0/24"),
+				),
+			},
+		},
+	})
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// Create and Read testing
+			{
+				Config: `
+				resource "netcalc_subnets" "test" {
+					pool_cidr_blocks = ["10.0.0.0/16"]
+					existing_cidr_blocks = ["10.0.0.0/24"]
+					cidr_mask_length = 24
+					cidr_count       = 2
+				  }`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.1.0/24,10.0.2.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.2.0/24"),
+				),
+			},
+			// Adding to the pool_cidr_blocks or existing_cidr_blocks does not cause recalculation
+			{
+				Config: `
+				resource "netcalc_subnets" "test" {
+					pool_cidr_blocks     = ["10.0.0.0/16", "10.1.0.0/16"]
+					existing_cidr_blocks = ["10.0.0.0/24","10.0.2.0/24","10.0.3.0/24","10.0.4.0/24","10.0.5.0/24"]
+					cidr_mask_length     = 24
+					cidr_count           = 2
+				  }`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.1.0/24,10.0.2.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.2.0/24"),
 				),
 			},
 		},
@@ -103,7 +159,7 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count       = 1
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.0.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
 				),
 			},
@@ -117,7 +173,7 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count       = 1
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "192.168.0.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "192.168.0.0/24"),
 				),
 			},
@@ -136,7 +192,7 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count       = 3
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "fd18:fad4:bce5:4400::/64,fd18:fad4:bce5:4401::/64,fd18:fad4:bce5:4402::/64"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "fd18:fad4:bce5:4400::/64"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "fd18:fad4:bce5:4401::/64"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "fd18:fad4:bce5:4402::/64"),
@@ -152,8 +208,8 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count           = 1
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
-					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "fd18:fad4:bce5:4400::/64"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "fd18:fad4:bce5:4403::/64"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "fd18:fad4:bce5:4403::/64"),
 				),
 			},
 		},
@@ -171,7 +227,7 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count       = 1
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "fd18:fad4:bce5:4400::/64"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "fd18:fad4:bce5:4400::/64"),
 				),
 			},
@@ -184,7 +240,7 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count       = 1
 				  }`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "fd18:fad4:bce5:5500::/64"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "fd18:fad4:bce5:5500::/64"),
 				),
 			},
@@ -209,11 +265,11 @@ func TestAccSubnetResource(t *testing.T) {
 					cidr_count           = 3
 				}`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.0.0/24,10.0.1.0/24,10.0.2.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.1.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.0.2.0/24"),
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test_chained", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "id", "10.0.3.0/24,10.0.4.0/24,10.0.5.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "cidr_blocks.0", "10.0.3.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "cidr_blocks.1", "10.0.4.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "cidr_blocks.2", "10.0.5.0/24"),
@@ -232,38 +288,90 @@ func TestAccSubnetResource(t *testing.T) {
 					pool_cidr_blocks     = ["10.0.0.0/16"]
 					existing_cidr_blocks = netcalc_subnets.test.cidr_blocks
 					cidr_mask_length     = 24
-					cidr_count           = 4
+					cidr_count           = 3
 				}`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test", "id", isUUID),
-					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
-					resource.TestCheckResourceAttrWith("netcalc_subnets.test_chained", "id", isUUID),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "id", "10.0.3.0/24,10.0.4.0/24,10.0.5.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "cidr_blocks.0", "10.0.3.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "cidr_blocks.1", "10.0.4.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "cidr_blocks.2", "10.0.5.0/24"),
-					resource.TestCheckResourceAttr("netcalc_subnets.test_chained", "cidr_blocks.3", "10.0.1.0/24"),
 				),
 			},
 		},
 	})
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// Create a typical config
+			{
+				Config: `
+				resource "netcalc_subnets" "test" {
+					pool_cidr_blocks = ["10.0.0.0/16"]
+					cidr_mask_length = 24
+					cidr_count       = 3
+				  }`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.0.0/24,10.0.1.0/24,10.0.2.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.0.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.0.2.0/24"),
+				),
+			},
+			// ImportState testing
+			{
+				ResourceName:            "netcalc_subnets.test",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"pool_cidr_blocks", "existing_cidr_blocks"},
+			},
+			// Change the pool CIDR blocks after import:
+			{
+				Config: `
+				resource "netcalc_subnets" "test" {
+					pool_cidr_blocks     = ["10.2.0.0/16"]
+					cidr_mask_length     = 24
+					cidr_count           = 3
+				  }`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.2.0.0/24,10.2.1.0/24,10.2.2.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.2.0.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.2.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.2.2.0/24"),
+				),
+			},
+			// ImportState testing
+			{
+				ResourceName:            "netcalc_subnets.test",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"pool_cidr_blocks", "existing_cidr_blocks"},
+			},
+			// Change the existing CIDR blocks after import:
+			{
+				Config: `
+				resource "netcalc_subnets" "test" {
+					pool_cidr_blocks     = ["10.2.0.0/16"]
+					existing_cidr_blocks = ["10.2.0.0/24","10.2.1.0/24","10.2.2.0/24"]
+					cidr_mask_length     = 24
+					cidr_count           = 3
+				  }`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.2.0.0/24,10.2.1.0/24,10.2.2.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.2.0.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.2.1.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.2.2.0/24"),
+				),
+			},
+			// ImportState testing
+			{
+				ResourceName:            "netcalc_subnets.test",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"pool_cidr_blocks", "existing_cidr_blocks"},
+			},
+		},
+	})
 }
-
-// ImportState testing
-// {
-// 	ResourceName:      "scaffolding_example.test",
-// 	ImportState:       true,
-// 	ImportStateVerify: true,
-// 	// This is not normally necessary, but is here because this
-// 	// example code does not have an actual upstream service.
-// 	// Once the Read method is able to refresh information from
-// 	// the upstream service, this can be removed.
-// 	ImportStateVerifyIgnore: []string{"configurable_attribute", "defaulted"},
-// },
-// Update and Read testing
-// {
-// 	Config: testAccExampleResourceConfig("two"),
-// 	Check: resource.ComposeAggregateTestCheckFunc(
-// 		resource.TestCheckResourceAttr("scaffolding_example.test", "configurable_attribute", "two"),
-// 	),
-// },
-// Delete testing automatically occurs in TestCase

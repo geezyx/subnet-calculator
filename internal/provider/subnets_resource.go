@@ -7,14 +7,15 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	"github.com/geezyx/subnet-calculator/internal/subnet"
-	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -32,10 +33,9 @@ func NewSubnetsResource() resource.Resource {
 
 // SubnetsResource defines the resource implementation.
 type SubnetsResource struct {
-	calculator *subnet.Calculator
 }
 
-// SubnetResourceModel describes the resource data model.
+// SubnetsResourceModel describes the resource data model.
 type SubnetsResourceModel struct {
 	PoolCIDRBlocks     types.Set    `tfsdk:"pool_cidr_blocks"`
 	ExistingCIDRBlocks types.Set    `tfsdk:"existing_cidr_blocks"`
@@ -78,17 +78,20 @@ func (r *SubnetsResource) Schema(ctx context.Context, req resource.SchemaRequest
 			"cidr_count": schema.Int64Attribute{
 				MarkdownDescription: "Number of CIDR blocks to provision",
 				Required:            true,
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.RequiresReplace(),
+				},
 			},
 			"cidr_blocks": schema.ListAttribute{
 				ElementType:         types.StringType,
 				MarkdownDescription: "Calculated CIDR block.",
 				Computed:            true,
 				PlanModifiers: []planmodifier.List{
-					UnknownValueOnCIDRCountChange(),
+					listplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"id": schema.StringAttribute{
-				MarkdownDescription: "Resource ID, same as the calculated cidr_block.",
+				MarkdownDescription: "Resource ID, same as the calculated cidr_blocks.",
 				Computed:            true,
 			},
 		},
@@ -96,7 +99,6 @@ func (r *SubnetsResource) Schema(ctx context.Context, req resource.SchemaRequest
 }
 
 func (r *SubnetsResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	r.calculator = subnet.NewCalculator()
 }
 
 func (r *SubnetsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -109,20 +111,23 @@ func (r *SubnetsResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	// Load CIDR blocks into calculator.
-	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, data)...)
+	calculator := subnet.NewCalculator()
+	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, data, calculator)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	cidrMaskLength := int(data.CIDRMaskLength.ValueInt64())
 	var calculatedCIDRs []types.String
+	var cidrStrings []string
 	for i := int64(0); i < data.CIDRCount.ValueInt64(); i++ {
-		next, err := r.calculator.NextAvailableSubnet(cidrMaskLength)
+		next, err := calculator.NextAvailableSubnet(cidrMaskLength)
 		if err != nil {
 			resp.Diagnostics.AddError("CIDR calculation error", fmt.Sprintf("Unable to calculate next available CIDR: %v", err))
 			return
 		}
 		calculatedCIDRs = append(calculatedCIDRs, types.StringValue(next.String()))
+		cidrStrings = append(cidrStrings, next.String())
 	}
 
 	// Save the calculated CIDR blocks into the Terraform state.
@@ -131,16 +136,11 @@ func (r *SubnetsResource) Create(ctx context.Context, req resource.CreateRequest
 	data.CIDRBlocks = val
 
 	// Set the ID
-	id, err := uuid.NewRandom()
-	if err != nil {
-		resp.Diagnostics.AddError("Create ID error", fmt.Sprintf("Unable to create ID for resource: %v", err))
-		return
-	}
-	data.ID = types.StringValue(id.String())
+	data.ID = types.StringValue(strings.Join(cidrStrings, ","))
 
 	// Write logs using the tflog package
 	// Documentation: https://terraform.io/plugin/log
-	tflog.Trace(ctx, "created a resource")
+	tflog.Info(ctx, "created a resource")
 
 	// Save data into Terraform state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -170,71 +170,19 @@ func (r *SubnetsResource) Update(ctx context.Context, req resource.UpdateRequest
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 
 	// Load CIDR blocks into calculator.
-	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, plan)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Update CIDR blocks.
-	var cidrBlocks types.List
-	var diagnostics diag.Diagnostics
-	stateCount := state.CIDRCount.ValueInt64()
-	planCount := plan.CIDRCount.ValueInt64()
-	switch {
-	case planCount == stateCount:
-		cidrBlocks = state.CIDRBlocks
-	case planCount > stateCount:
-		cidrBlocks, diagnostics = r.IncreaseCIDRBlockCount(ctx, state.CIDRBlocks, int(planCount-stateCount), int(plan.CIDRMaskLength.ValueInt64()))
-	case planCount < stateCount:
-		cidrBlocks, diagnostics = r.DecreaseCIDRBlockCount(ctx, state.CIDRBlocks, int(stateCount-planCount))
-	}
-	resp.Diagnostics.Append(diagnostics...)
+	calculator := subnet.NewCalculator()
+	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, plan, calculator)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	// Set state values.
-	plan.CIDRBlocks = cidrBlocks
+	plan.CIDRBlocks = state.CIDRBlocks
 	plan.ID = state.ID
+	tflog.Info(ctx, "updated a resource")
 
 	// Save updated data into Terraform state.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-}
-
-func (r *SubnetsResource) IncreaseCIDRBlockCount(ctx context.Context, existing types.List, count, cidrMaskLength int) (types.List, diag.Diagnostics) {
-	var diagnostics diag.Diagnostics
-	var cidrs []types.String
-	diagnostics.Append(existing.ElementsAs(ctx, &cidrs, false)...)
-	for i := 0; i < count; i++ {
-		next, err := r.calculator.NextAvailableSubnet(cidrMaskLength)
-		if err != nil {
-			diagnostics.AddError("CIDR calculation error", fmt.Sprintf("Unable to calculate next available CIDR: %v", err))
-			continue
-		}
-		cidrs = append(cidrs, types.StringValue(next.String()))
-	}
-	val, d := types.ListValueFrom(ctx, types.StringType, cidrs)
-	diagnostics.Append(d...)
-	return val, diagnostics
-}
-
-func (r *SubnetsResource) DecreaseCIDRBlockCount(ctx context.Context, existing types.List, count int) (types.List, diag.Diagnostics) {
-	var diagnostics diag.Diagnostics
-	var cidrs []types.String
-	diagnostics.Append(existing.ElementsAs(ctx, &cidrs, false)...)
-	for i := 0; i < count; i++ {
-		cidr := cidrs[len(cidrs)-1]
-		n, err := netip.ParsePrefix(cidr.ValueString())
-		if err != nil {
-			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse existing CIDR: %q, %v", cidr, err))
-			continue
-		}
-		r.calculator.DeleteAllocatedPrefix(n)
-		cidrs = cidrs[:len(cidrs)-1]
-	}
-	val, d := types.ListValueFrom(ctx, types.StringType, cidrs)
-	diagnostics.Append(d...)
-	return val, diagnostics
 }
 
 func (r *SubnetsResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -246,13 +194,44 @@ func (r *SubnetsResource) Delete(ctx context.Context, req resource.DeleteRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	tflog.Info(ctx, "deleted a resource")
 }
 
 func (r *SubnetsResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	// Parse the CIDRs from the ID.
+	var prefixes []netip.Prefix
+	var calculatedCIDRs []types.String
+	for _, cidr := range strings.Split(req.ID, ",") {
+		p, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			resp.Diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse CIDR from ID: %q, %v", cidr, err))
+			continue
+		}
+		prefixes = append(prefixes, p)
+		calculatedCIDRs = append(calculatedCIDRs, types.StringValue(cidr))
+	}
+	if len(prefixes) == 0 {
+		resp.Diagnostics.AddError("Invalid ID", "ID must consist of comma-separated CIDR blocks of the same size.")
+	}
+	maskLength := prefixes[0].Bits()
+	for _, p := range prefixes {
+		if p.Bits() != maskLength {
+			resp.Diagnostics.AddError("CIDR prefix lengths do not match", fmt.Sprintf("Expected all cidr masks to be the same size, but found %d and %d.", maskLength, p.Bits()))
+		}
+	}
+
+	// Save the calculated CIDR blocks into the Terraform state.
+	val, diagnostics := types.ListValueFrom(ctx, types.StringType, calculatedCIDRs)
+	resp.Diagnostics.Append(diagnostics...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("cidr_blocks"), val)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("cidr_count"), types.Int64Value(int64(len(calculatedCIDRs))))...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("cidr_mask_length"), types.Int64Value(int64(maskLength)))...)
+
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	tflog.Info(ctx, "imported a resource")
 }
 
-func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceModel) diag.Diagnostics {
+func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceModel, calculator *subnet.Calculator) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 
 	var poolCIDRBlocks []types.String
@@ -276,7 +255,7 @@ func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceM
 			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse pool CIDR %q: %v", cidr, err))
 			continue
 		}
-		if err := r.calculator.AddPool(n); err != nil {
+		if err := calculator.AddPool(n); err != nil {
 			diagnostics.AddError("Subnet calculator error", fmt.Sprintf("Unable to add pool CIDR %q: %v", cidr, err))
 		}
 	}
@@ -286,7 +265,7 @@ func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceM
 			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse existing CIDR: %q, %v", cidr, err))
 			continue
 		}
-		if err := r.calculator.AddAllocatedPrefix(n); err != nil {
+		if err := calculator.AddAllocatedPrefix(n); err != nil {
 			diagnostics.AddError("Subnet calculator error", fmt.Sprintf("Unable to add existing CIDR %q: %v", cidr, err))
 		}
 	}
@@ -296,7 +275,7 @@ func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceM
 			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse calculated CIDR: %q, %v", cidr, err))
 			continue
 		}
-		if err := r.calculator.AddAllocatedPrefix(n); err != nil {
+		if err := calculator.AddAllocatedPrefix(n); err != nil {
 			diagnostics.AddError("Subnet calculator error", fmt.Sprintf("Unable to add calculated CIDR %q: %v", cidr, err))
 		}
 	}
@@ -307,82 +286,41 @@ func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceM
 // against the list of available CIDR blocks in the configuration. If the calculated CIDR no longer belongs to one of the available
 // blocks, it will require replacement.
 func (r *SubnetsResource) AvailableCIDRBlocksNoLongerContainsResourceCIDR(ctx context.Context, req planmodifier.SetRequest, resp *setplanmodifier.RequiresReplaceIfFuncResponse) {
-	// Plan modifier doesnt call Configure so we need to initialize our calculator.
-	r.calculator = subnet.NewCalculator()
+	calculator := subnet.NewCalculator()
 
 	var state SubnetsResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	var config SubnetsResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	// Load state into calculator.
-	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, state)...)
+	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, config, calculator)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	var allocatedCIDRBlocks []types.String
 	for _, elem := range state.CIDRBlocks.Elements() {
 		cidr, ok := elem.(types.String)
 		if !ok {
 			resp.Diagnostics.AddError("Value conversion error", "Unable to build a value from the the list of allocated CIDR blocks.")
 		}
-		allocatedCIDRBlocks = append(allocatedCIDRBlocks, cidr)
-	}
 
-	for _, cidr := range allocatedCIDRBlocks {
 		n, err := netip.ParsePrefix(cidr.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse calculated CIDR: %q, %v", cidr, err))
 			continue
 		}
-		r.calculator.PrefixInPools(n)
-	}
-	resp.RequiresReplace = true
-}
-
-// UseStateForUnknown returns a plan modifier that copies a known prior state
-// value into the planned value. Use this when it is known that an unconfigured
-// value will remain the same after a resource update.
-//
-// To prevent Terraform errors, the framework automatically sets unconfigured
-// and Computed attributes to an unknown value "(known after apply)" on update.
-// Using this plan modifier will instead display the prior state value in the
-// plan, unless a prior plan modifier adjusts the value.
-func UnknownValueOnCIDRCountChange() planmodifier.List {
-	return unknownValueOnCIDRCountChange{}
-}
-
-// useStateForUnknownModifier implements the plan modifier.
-type unknownValueOnCIDRCountChange struct{}
-
-// Description returns a human-readable description of the plan modifier.
-func (m unknownValueOnCIDRCountChange) Description(_ context.Context) string {
-	return "Once set, the value of this attribute in state will not change."
-}
-
-// MarkdownDescription returns a markdown description of the plan modifier.
-func (m unknownValueOnCIDRCountChange) MarkdownDescription(_ context.Context) string {
-	return "Once set, the value of this attribute in state will not change."
-}
-
-// PlanModifyList implements the plan modification logic.
-func (m unknownValueOnCIDRCountChange) PlanModifyList(ctx context.Context, req planmodifier.ListRequest, resp *planmodifier.ListResponse) {
-	// Do nothing if there is no state value.
-	if req.StateValue.IsNull() {
-		return
-	}
-
-	// Read Terraform plan data into the model
-	var plan SubnetsResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-
-	// Read Terraform plan data into the model
-	var state SubnetsResourceModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-
-	if !plan.CIDRCount.Equal(state.CIDRCount) {
-		resp.PlanValue = types.ListUnknown(types.StringType)
+		if !calculator.PrefixInPools(n) {
+			tflog.Debug(ctx, fmt.Sprintf("Prefix %s is not in cidr blocks %v", cidr.ValueString(), config.PoolCIDRBlocks))
+			resp.RequiresReplace = true
+		} else {
+			tflog.Debug(ctx, fmt.Sprintf("Prefix %s is still in cidr blocks %v", cidr.ValueString(), config.PoolCIDRBlocks))
+		}
 	}
 }
