@@ -82,4 +82,4 @@ data "aws_subnet" "subnet" {
 ### Read-Only
 
 - `cidr_blocks` (List of String) Calculated CIDR block.
-- `id` (String) Resource ID, same as the calculated cidr_block.
+- `id` (String) Resource ID, same as the calculated cidr_blocks.
