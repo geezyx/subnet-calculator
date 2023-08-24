@@ -56,7 +56,7 @@ func TestAccSubnetResource(t *testing.T) {
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "id", "10.0.1.0/24,10.0.5.0/24,10.0.7.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.0", "10.0.1.0/24"),
 					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.1", "10.0.5.0/24"),
-					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2us", "10.0.7.0/24"),
+					resource.TestCheckResourceAttr("netcalc_subnets.test", "cidr_blocks.2", "10.0.7.0/24"),
 				),
 			},
 		},
