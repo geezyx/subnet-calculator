@@ -160,7 +160,7 @@ func (r *SubnetResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 	if !r.calculator.PrefixInPools(p) {
-		tflog.Info(ctx, "CIDR block is no longer valid; removing state in order to recalculate resource")
+		tflog.Info(ctx, "CIDR block is no longer valid; removing resource in order to indicate replacement is needed")
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -179,16 +179,8 @@ func (r *SubnetResource) Update(ctx context.Context, req resource.UpdateRequest,
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 
 	// Set state values. Update operations are always modeled as a replacement, so we don't do any reallocation here.
-	if plan.CIDRBlock.IsNull() || plan.CIDRBlock.IsUnknown() {
-		tflog.Info(ctx, "Updating a CIDR block")
-		resp.Diagnostics.Append(r.calculateSubnet(&plan)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	} else {
-		plan.CIDRBlock = state.CIDRBlock
-		plan.ID = state.ID
-	}
+	plan.CIDRBlock = state.CIDRBlock
+	plan.ID = state.ID
 
 	// Save updated data into Terraform state.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
