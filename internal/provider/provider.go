@@ -60,7 +60,7 @@ func (p *NetcalcProvider) Schema(ctx context.Context, req provider.SchemaRequest
 		Attributes: map[string]schema.Attribute{
 			"pool_cidr_blocks": schema.ListAttribute{
 				ElementType:         types.StringType,
-				Required:            true,
+				Optional:            true,
 				MarkdownDescription: "IPv4 and/or IPv6 CIDR blocks that form a collective pool to be allocated in this provider.",
 				Validators:          []validator.List{listvalidator.ValueStringsAre(ipAddressValidator{})},
 			},
@@ -117,10 +117,10 @@ func (p *NetcalcProvider) Configure(ctx context.Context, req provider.ConfigureR
 		c: subnet.NewCalculator(),
 	}
 
-	for _, prefix := range parsePrefixList(data.PoolCIDRBlocks, resp.Diagnostics) {
+	for _, prefix := range parsePrefixList(data.PoolCIDRBlocks, &resp.Diagnostics) {
 		p.calculator.AddPool(prefix)
 	}
-	for _, prefix := range parsePrefixList(data.ClaimedCIDRBlocks, resp.Diagnostics) {
+	for _, prefix := range parsePrefixList(data.ClaimedCIDRBlocks, &resp.Diagnostics) {
 		p.calculator.AddAllocatedPrefix(prefix)
 	}
 
@@ -128,7 +128,7 @@ func (p *NetcalcProvider) Configure(ctx context.Context, req provider.ConfigureR
 	resp.ResourceData = p.calculator
 }
 
-func parsePrefixList(data types.List, diagnostics diag.Diagnostics) []netip.Prefix {
+func parsePrefixList(data types.List, diagnostics *diag.Diagnostics) []netip.Prefix {
 	var prefixes []netip.Prefix
 	for _, elem := range data.Elements() {
 		cidr, ok := elem.(types.String)
@@ -157,6 +157,7 @@ func parsePrefix(cidr types.String, diagnostics diag.Diagnostics) netip.Prefix {
 func (p *NetcalcProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewSubnetResource,
+		NewSubnetsResource,
 	}
 }
 

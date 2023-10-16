@@ -54,5 +54,5 @@ resource "netcalc_subnet" "example_ipv6" {
 Import is supported using the following syntax:
 
 ```shell
-terraform import netcalc_subnets.example 10.0.0.0/24,10.0.1.0/24,10.0.2.0/24
+terraform import netcalc_subnet.example 10.0.0.0/24
 ```
