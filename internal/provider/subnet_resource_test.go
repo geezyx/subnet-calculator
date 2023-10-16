@@ -247,26 +247,31 @@ func TestAccSubnetResource(t *testing.T) {
 				),
 			},
 			// Only available CIDR blocks are chosen
+			// CIDR blocks which are deleted are then made available
 			{
 				Config: `
 				provider "netcalc" {
-					pool_cidr_blocks    = ["fd18:fad4:bce5:4400::/56"]
-					claimed_cidr_blocks = ["fd18:fad4:bce5:4400::/64"]
+					pool_cidr_blocks    = ["fd18:fad4:bce5:4400::/56", "10.0.0.0/8"]
+					claimed_cidr_blocks = ["fd18:fad4:bce5:4400::/64","fd18:fad4:bce5:4401::/64"]
 				}
-				resource "netcalc_subnet" "test" {
-					count            = 4
+				resource "netcalc_subnet" "many" {
+					count            = 200
 					ip_family        = "ipv6"
 					cidr_mask_length = 64
 				}
-				output "ids" {
-					value = join(",", sort(netcalc_subnet.test.*.id))
+				resource "netcalc_subnet" "many_ipv4" {
+					count            = 200
+					ip_family        = "ipv4"
+					cidr_mask_length = 28
 				}
-				output "subnets" {
-					value = join(",", sort(netcalc_subnet.test.*.cidr_block))
+				output "distinct_count" {
+					value = length(distinct(flatten([
+						netcalc_subnet.many.*.cidr_block,
+						netcalc_subnet.many_ipv4.*.cidr_block,
+					])))
 				}`,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckOutput("ids", "fd18:fad4:bce5:4400::/64,fd18:fad4:bce5:4401::/64,fd18:fad4:bce5:4402::/64,fd18:fad4:bce5:4403::/64"),
-					resource.TestCheckOutput("subnets", "fd18:fad4:bce5:4400::/64,fd18:fad4:bce5:4401::/64,fd18:fad4:bce5:4402::/64,fd18:fad4:bce5:4403::/64"),
+					resource.TestCheckOutput("distinct_count", "400"),
 				),
 			},
 		},
