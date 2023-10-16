@@ -52,7 +52,7 @@ func (r *SubnetsResource) Metadata(ctx context.Context, req resource.MetadataReq
 func (r *SubnetsResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		// This description is used by the documentation generator and the language server.
-		MarkdownDescription: "Subnet resource",
+		MarkdownDescription: "*Deprecated* Subnet resource. Use `netcalc_subnet` instead. This resource will be removed in an upcoming version of this provider.",
 		DeprecationMessage:  "Use netcalc_subnet instead. This resource will be removed in an upcoming version of this provider.",
 		Attributes: map[string]schema.Attribute{
 			"pool_cidr_blocks": schema.SetAttribute{
