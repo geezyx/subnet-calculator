@@ -3,12 +3,12 @@
 page_title: "netcalc_subnets Resource - terraform-provider-netcalc"
 subcategory: ""
 description: |-
-  Subnet resource
+  Deprecated Subnet resource. Use netcalc_subnet instead. This resource will be removed in an upcoming version of this provider.
 ---
 
 # netcalc_subnets (Resource)
 
-Subnet resource
+*Deprecated* Subnet resource. Use `netcalc_subnet` instead. This resource will be removed in an upcoming version of this provider.
 
 ## Example Usage
 

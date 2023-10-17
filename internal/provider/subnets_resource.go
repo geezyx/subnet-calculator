@@ -52,8 +52,8 @@ func (r *SubnetsResource) Metadata(ctx context.Context, req resource.MetadataReq
 func (r *SubnetsResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		// This description is used by the documentation generator and the language server.
-		MarkdownDescription: "Subnet resource",
-
+		MarkdownDescription: "*Deprecated* Subnet resource. Use `netcalc_subnet` instead. This resource will be removed in an upcoming version of this provider.",
+		DeprecationMessage:  "Use netcalc_subnet instead. This resource will be removed in an upcoming version of this provider.",
 		Attributes: map[string]schema.Attribute{
 			"pool_cidr_blocks": schema.SetAttribute{
 				ElementType:         types.StringType,
@@ -112,7 +112,7 @@ func (r *SubnetsResource) Create(ctx context.Context, req resource.CreateRequest
 
 	// Load CIDR blocks into calculator.
 	calculator := subnet.NewCalculator()
-	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, data, calculator)...)
+	family := r.LoadCIDRBlocks(ctx, data, calculator, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -121,7 +121,11 @@ func (r *SubnetsResource) Create(ctx context.Context, req resource.CreateRequest
 	var calculatedCIDRs []types.String
 	var cidrStrings []string
 	for i := int64(0); i < data.CIDRCount.ValueInt64(); i++ {
-		next, err := calculator.NextAvailableSubnet(cidrMaskLength)
+		calc := calculator.NextAvailableIPv4Subnet
+		if family == modeV6 {
+			calc = calculator.NextAvailableIPv6Subnet
+		}
+		next, err := calc(cidrMaskLength)
 		if err != nil {
 			resp.Diagnostics.AddError("CIDR calculation error", fmt.Sprintf("Unable to calculate next available CIDR: %v", err))
 			return
@@ -171,7 +175,7 @@ func (r *SubnetsResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	// Load CIDR blocks into calculator.
 	calculator := subnet.NewCalculator()
-	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, plan, calculator)...)
+	r.LoadCIDRBlocks(ctx, plan, calculator, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -231,55 +235,68 @@ func (r *SubnetsResource) ImportState(ctx context.Context, req resource.ImportSt
 	tflog.Info(ctx, "imported a resource")
 }
 
-func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceModel, calculator *subnet.Calculator) diag.Diagnostics {
-	var diagnostics diag.Diagnostics
+type mode int
 
-	var poolCIDRBlocks []types.String
-	diagnostics.Append(s.PoolCIDRBlocks.ElementsAs(ctx, &poolCIDRBlocks, false)...)
+const (
+	modeUnknown mode = iota
+	modeV4
+	modeV6
+)
 
-	var existingCIDRBlocks []types.String
-	diagnostics.Append(s.ExistingCIDRBlocks.ElementsAs(ctx, &existingCIDRBlocks, false)...)
-
-	var allocatedCIDRBlocks []types.String
-	for _, elem := range s.CIDRBlocks.Elements() {
-		cidr, ok := elem.(types.String)
-		if !ok {
-			diagnostics.AddError("Value conversion error", "Unable to build a value from the the list of allocated CIDR blocks.")
+func (r *SubnetsResource) LoadCIDRBlocks(ctx context.Context, s SubnetsResourceModel, calculator *subnet.Calculator, diagnostics *diag.Diagnostics) mode {
+	family := modeUnknown
+	familyMatches := func(cidr netip.Prefix) bool {
+		switch family {
+		case modeV4:
+			return cidr.Addr().Is4()
+		case modeV6:
+			return cidr.Addr().Is6()
+		default:
+			if cidr.Addr().Is6() {
+				family = modeV6
+			} else {
+				family = modeV4
+			}
+			return true
 		}
-		allocatedCIDRBlocks = append(allocatedCIDRBlocks, cidr)
 	}
-
-	for _, cidr := range poolCIDRBlocks {
-		n, err := netip.ParsePrefix(cidr.ValueString())
-		if err != nil {
-			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse pool CIDR %q: %v", cidr, err))
+	for _, cidr := range parsePrefixSet(ctx, s.PoolCIDRBlocks, diagnostics) {
+		if !familyMatches(cidr) {
+			diagnostics.AddError("IP family mismatch", fmt.Sprintf("CIDR block %q is not expected IP family", cidr))
 			continue
 		}
-		if err := calculator.AddPool(n); err != nil {
-			diagnostics.AddError("Subnet calculator error", fmt.Sprintf("Unable to add pool CIDR %q: %v", cidr, err))
-		}
+		calculator.AddPool(cidr)
 	}
-	for _, cidr := range existingCIDRBlocks {
-		n, err := netip.ParsePrefix(cidr.ValueString())
-		if err != nil {
-			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse existing CIDR: %q, %v", cidr, err))
+	for _, cidr := range parsePrefixSet(ctx, s.ExistingCIDRBlocks, diagnostics) {
+		if !familyMatches(cidr) {
+			diagnostics.AddError("IP family mismatch", fmt.Sprintf("CIDR block %q is not expected IP family", cidr))
 			continue
 		}
-		if err := calculator.AddAllocatedPrefix(n); err != nil {
-			diagnostics.AddError("Subnet calculator error", fmt.Sprintf("Unable to add existing CIDR %q: %v", cidr, err))
-		}
+		calculator.AddAllocatedPrefix(cidr)
 	}
-	for _, cidr := range allocatedCIDRBlocks {
-		n, err := netip.ParsePrefix(cidr.ValueString())
-		if err != nil {
-			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse calculated CIDR: %q, %v", cidr, err))
+	for _, cidr := range parsePrefixList(s.CIDRBlocks, diagnostics) {
+		if !familyMatches(cidr) {
+			diagnostics.AddError("IP family mismatch", fmt.Sprintf("CIDR block %q is not expected IP family", cidr))
 			continue
 		}
-		if err := calculator.AddAllocatedPrefix(n); err != nil {
-			diagnostics.AddError("Subnet calculator error", fmt.Sprintf("Unable to add calculated CIDR %q: %v", cidr, err))
-		}
+		calculator.AddAllocatedPrefix(cidr)
 	}
-	return diagnostics
+	return family
+}
+
+func parsePrefixSet(ctx context.Context, data types.Set, diagnostics *diag.Diagnostics) []netip.Prefix {
+	var elements []types.String
+	diagnostics.Append(data.ElementsAs(ctx, &elements, false)...)
+	var prefixes []netip.Prefix
+	for _, cidr := range elements {
+		n, err := netip.ParsePrefix(cidr.ValueString())
+		if err != nil {
+			diagnostics.AddError("CIDR parsing error", fmt.Sprintf("Unable to parse pool CIDR: %q, %v", cidr, err))
+			continue
+		}
+		prefixes = append(prefixes, n)
+	}
+	return prefixes
 }
 
 // AvailableCIDRBlocksNoLongerContainsResourceCIDR checks the existing calculated CIDR block (if it exists in the current state)
@@ -300,7 +317,7 @@ func (r *SubnetsResource) AvailableCIDRBlocksNoLongerContainsResourceCIDR(ctx co
 	}
 
 	// Load state into calculator.
-	resp.Diagnostics.Append(r.LoadCIDRBlocks(ctx, config, calculator)...)
+	r.LoadCIDRBlocks(ctx, config, calculator, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}

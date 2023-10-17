@@ -1,0 +1,1 @@
+terraform import netcalc_subnet.example 10.0.0.0/24
